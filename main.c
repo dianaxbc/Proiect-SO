@@ -1,11 +1,11 @@
-#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 #include "treasure_manager.h"
 
 int main(int argc, char *argv[]) {
     if (argc < 3) {
-        printf("Usage: treasure_manager <command> <hunt_id> [<id>]\n");
+        write(1, "Usage: treasure_manager <command> <hunt_id> [<id>]\n", 51);
         return 1;
     }
 
@@ -20,7 +20,7 @@ int main(int argc, char *argv[]) {
     } else if (strcmp(argv[1], "remove_hunt") == 0) {
         remove_hunt(argv[2]);
     } else {
-        printf("Unknown command or wrong arguments.\n");
+        write(1, "Unknown command or wrong arguments.\n", 36);
     }
 
     return 0;
