@@ -1,132 +1,87 @@
+
+#include <stdio.h>
+#include <stdlib.h>
 #include <unistd.h>
 #include <fcntl.h>
-#include <stdlib.h>
-#include <stdio.h>   
 #include <string.h>
 #include <signal.h>
 #include <sys/types.h>
-#include <sys/stat.h>
-#include <errno.h>
+#include <sys/wait.h>
 
-#define MAX_LINE 256
-#define CONTROL_FILE "control"
-#define STATUS_FILE "status"
-#define PID_FILE "monitor.pid"
+#define CONTROL_FILE "control.cmd"
+#define STATUS_FILE "status.out"
 
-volatile sig_atomic_t got_response = 0;
+pid_t monitor_pid = -1;
+int monitor_ready = 0;
 
-void handle_sigusr2(int sig) {
-    got_response = 1;
-}
-
-// citeste o linie de la tastatura (stdin) folosind read
-ssize_t read_line(int fd, char *buffer, size_t max_len) {
-    size_t i = 0;
-    char c;
-    while (i < max_len - 1) {
-        ssize_t r = read(fd, &c, 1);
-        if (r <= 0) break;
-        if (c == '\n') break;
-        buffer[i++] = c;
-    }
-    buffer[i] = '\0';
-    return i;
-}
-
-// scrie comanda in fisierul control
-void send_command(const char *hunt_id, const char *command) {
-    char path[256];
-    snprintf(path, sizeof(path), "%s/%s", hunt_id, CONTROL_FILE);
-    int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-    if (fd < 0) {
-        write(2, "Eroare la open control file\n", 28);
-        return;
-    }
-    write(fd, command, strlen(command));
+void send_command(const char *cmd) {
+    int fd = open(CONTROL_FILE, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    write(fd, cmd, strlen(cmd));
     close(fd);
+    kill(monitor_pid, SIGUSR1);
 }
 
-// citeste pid-ul monitorului din fisier
-pid_t get_monitor_pid(const char *hunt_id) {
-    char path[256];
-    snprintf(path, sizeof(path), "%s/%s", hunt_id, PID_FILE);
-    int fd = open(path, O_RDONLY);
-    if (fd < 0) {
-        write(2, "Eroare la open pid file\n", 25);
-        return -1;
+void read_status() {
+    usleep(200000);
+    int fd = open(STATUS_FILE, O_RDONLY);
+    if (fd >= 0) {
+        char buf[4096];
+        int n = read(fd, buf, sizeof(buf) - 1);
+        buf[n] = '\0';
+        printf("%s", buf);
+        close(fd);
     }
-    char buf[20];
-    int r = read(fd, buf, sizeof(buf) - 1);
-    close(fd);
-    if (r <= 0) return -1;
-    buf[r] = '\0';
-    return (pid_t)atoi(buf);
 }
 
-// citeste si afiseaza statusul returnat de monitor
-void read_status(const char *hunt_id) {
-    char path[256];
-    snprintf(path, sizeof(path), "%s/%s", hunt_id, STATUS_FILE);
-    int fd = open(path, O_RDONLY);
-    if (fd < 0) {
-        write(2, "Eroare la open status file\n", 27);
-        return;
-    }
-
-    char buf[512];
-    ssize_t bytes;
-    while ((bytes = read(fd, buf, sizeof(buf))) > 0) {
-        write(1, buf, bytes);
-    }
-
-    close(fd);
+void sigchld_handler(int sig) {
+    int status;
+    waitpid(monitor_pid, &status, 0);
+    monitor_ready = 0;
+    printf("Monitor exited.\n");
 }
 
 int main() {
-    signal(SIGUSR2, handle_sigusr2);
+    struct sigaction sa;
+    sa.sa_handler = sigchld_handler;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = SA_RESTART;
+    sigaction(SIGCHLD, &sa, NULL);
 
-    char line[MAX_LINE];
-    write(1, "Treasure Hub - enter commands ('exit' to quit):\n", 49);
-
+    char input[128];
     while (1) {
-        write(1, "> ", 2);
+        printf("> ");
+        fflush(stdout);
+        if (!fgets(input, sizeof(input), stdin)) break;
+        input[strcspn(input, "\n")] = 0;
 
-        ssize_t len = read_line(0, line, sizeof(line));
-        if (len <= 0) break;
-
-        if (strcmp(line, "exit") == 0) break;
-
-        // Separam comanda si hunt_id-ul
-        char *cmd = strtok(line, " ");
-        char *hunt_id = strtok(NULL, " ");
-
-        if (!cmd || !hunt_id) {
-            write(1, "Comanda invalida. Format: <cmd> <hunt_id>\n", 42);
-            continue;
+        if (strcmp(input, "start_monitor") == 0 && monitor_ready == 0) {
+            monitor_pid = fork();
+            if (monitor_pid == 0) execl("./treasure_monitor", "treasure_monitor", NULL);
+            else monitor_ready = 1;
         }
-
-        pid_t mon_pid = get_monitor_pid(hunt_id);
-        if (mon_pid < 0) {
-            write(1, "PID-ul monitorului nu a fost gasit\n", 35);
-            continue;
+        else if (strncmp(input, "list_hunts", 10) == 0 && monitor_ready) {
+            send_command("list_hunts"); read_status();
         }
-
-        send_command(hunt_id, cmd);
-        kill(mon_pid, SIGUSR1);
-
-        // asteapta semnalul SIGUSR2 de la monitor
-        got_response = 0;
-        int tries = 50;
-        while (!got_response && tries-- > 0) {
-            usleep(100000); // 100ms
+        else if (strncmp(input, "list_treasures", 14) == 0 && monitor_ready) {
+            char *hunt = input + 15;
+            char buf[128]; snprintf(buf, sizeof(buf), "list_treasures %s", hunt);
+            send_command(buf); read_status();
         }
-
-        if (got_response) {
-            read_status(hunt_id);
-        } else {
-            write(1, "Monitorul nu a raspuns.\n", 25);
+        else if (strncmp(input, "view_treasure", 13) == 0 && monitor_ready) {
+            char *rest = input + 14;
+            char buf[128]; snprintf(buf, sizeof(buf), "view_treasure %s", rest);
+            send_command(buf); read_status();
+        }
+        else if (strcmp(input, "stop_monitor") == 0 && monitor_ready) {
+            send_command("stop_monitor");
+        }
+        else if (strcmp(input, "exit") == 0) {
+            if (monitor_ready) printf("Monitor still running. Use stop_monitor first.\n");
+            else break;
+        }
+        else {
+            printf("Unknown or invalid command.\n");
         }
     }
-
     return 0;
 }
